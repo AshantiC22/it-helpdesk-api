@@ -2,21 +2,21 @@ name: helpdesk
 
 services:
   db:
-    image: postgres:16                                  # which Postgres image and version?
+    image: postgres:16
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}                  # the variable NAME from your .env
-      POSTGRES_DB: helpdesk                          # the database name (underscore rule!)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}   # read from .env, never committed
+      POSTGRES_DB: helpdesk
     ports:
-      - "5435:5432"                               # HOST:CONTAINER, so pick a free host port
+      - "5435:5432"                             # host 5435 -> container 5432 (5432 is used by another project)
     volumes:
-      - helpdesk:/var/lib/postgresql/data             # your named volume
-      - ./db:/docker-entrypoint-initdb.d:ro       # NEW: run every script in db/
+      - helpdesk:/var/lib/postgresql/data       # named volume: data survives container removal
+      - ./db:/docker-entrypoint-initdb.d:ro     # runs db/*.sql once, on first init
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h localhost -U postgres -d helpdesk"]
       interval: 5s
       timeout: 3s
       retries: 10
-    restart: unless-stopped                                # which policy restarts after a reboot?
+    restart: unless-stopped
 
 volumes:
-  helpdesk:                                           # declare the same named volume here
+  helpdesk:

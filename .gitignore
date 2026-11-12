@@ -4,4 +4,3 @@ __pycache__/
 .venv/
 backups/
 *_backup.sql
-.env.example
