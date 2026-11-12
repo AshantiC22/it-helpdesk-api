@@ -1,0 +1,22 @@
+name: helpdesk
+
+services:
+  db:
+    image: postgres:16                                  # which Postgres image and version?
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}                  # the variable NAME from your .env
+      POSTGRES_DB: helpdesk                          # the database name (underscore rule!)
+    ports:
+      - "5435:5432"                               # HOST:CONTAINER, so pick a free host port
+    volumes:
+      - helpdesk:/var/lib/postgresql/data             # your named volume
+      - ./db:/docker-entrypoint-initdb.d:ro       # NEW: run every script in db/
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U postgres -d helpdesk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped                                # which policy restarts after a reboot?
+
+volumes:
+  helpdesk:                                           # declare the same named volume here

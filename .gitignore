@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+backups/
+*_backup.sql
+.env.example
