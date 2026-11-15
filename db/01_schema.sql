@@ -30,8 +30,10 @@ CREATE TABLE tickets (
     resolution_note TEXT,
     requester_id    INT NOT NULL REFERENCES people(id) ON DELETE RESTRICT,
     technician_id   INT REFERENCES people(id) ON DELETE RESTRICT,
-    device_id       INT REFERENCES devices(id) ON DELETE SET NULL
+    device_id       INT REFERENCES devices(id) ON DELETE SET NULL, CONSTRAINT resolved_after_created CHECK(resolved_at >= created_at)
 );
+
+CREATE UNIQUE INDEX one_open_ticket_per_device ON tickets (device_id) WHERE status NOT IN ('resolved','closed');
 
 CREATE TABLE comments (
     id          INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
