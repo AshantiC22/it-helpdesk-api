@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}   # read from .env, never committed
       POSTGRES_DB: helpdesk
     ports:
-      - "5435:5432"                             # host 5435 -> container 5432 (5432 is used by another project)
+      - "5435:5432"                             # host 5435 -> container 5432
     volumes:
       - helpdesk:/var/lib/postgresql/data       # named volume: data survives container removal
       - ./db:/docker-entrypoint-initdb.d:ro     # runs db/*.sql once, on first init
@@ -16,6 +16,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: helpdesk
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy    # wait until the DB is healthy, not just started
     restart: unless-stopped
 
 volumes:
