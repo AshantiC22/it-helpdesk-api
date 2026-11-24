@@ -389,3 +389,203 @@ def get_ticket(ticket_id: int):
             "room": row["device_room"],
         },
     }
+
+
+# ---------- Comments ----------
+
+class CommentIn(BaseModel):
+    """The body of POST /tickets/{id}/comments.
+
+    ticket_id is absent on purpose: it comes from the URL path, so a client
+    cannot post a comment onto a different ticket than the one it addressed.
+    """
+    author_id: int
+    body: str = Field(min_length=1)
+    is_internal: bool = True
+
+
+@app.get("/tickets/{ticket_id}/comments")
+def list_comments(ticket_id: int):
+    """A ticket's comments, oldest first. 404 if the ticket does not exist."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+
+            # 1. does this ticket exist?
+            cur.execute("SELECT 1 FROM tickets WHERE id = %s", (ticket_id,))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="ticket not found")
+
+            # 2. its comments
+            cur.execute(
+                """
+                SELECT id, ticket_id, author_id, body, created_at, is_internal
+                FROM comments
+                WHERE ticket_id = %s
+                ORDER BY created_at
+                """,
+                (ticket_id,),
+            )
+            return cur.fetchall()
+
+
+@app.post("/tickets/{ticket_id}/comments", status_code=201)
+def add_comment(ticket_id: int, payload: CommentIn):
+    """Adds a comment to a ticket.
+
+    ticket_id comes from the path, not the body. No existence pre-check is
+    needed: ticket_id and author_id are both foreign keys, so Postgres rejects
+    a bad one and the except below turns that into a 404.
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO comments (ticket_id, author_id, body, is_internal)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (ticket_id, payload.author_id, payload.body, payload.is_internal),
+                )
+                return cur.fetchone()
+    except psycopg.errors.ForeignKeyViolation:
+        raise HTTPException(status_code=404, detail="ticket or author not found")
+
+
+# ---------- Assignment and status ----------
+
+class AssignIn(BaseModel):
+    """The body of PATCH /tickets/{id}/assign. null unassigns the ticket."""
+    technician_id: int | None = None
+
+
+class StatusIn(BaseModel):
+    """The body of PATCH /tickets/{id}/status."""
+    status: str = Field(pattern="^(open|in_progress|waiting_on_user|resolved|closed)$")
+    resolution_note: str | None = None
+
+
+# Which status moves are legal. The CHECK constraint enforces the vocabulary;
+# this enforces the grammar. closed is terminal, so nothing leaves it.
+LEGAL_TRANSITIONS = {
+    "open": {"in_progress", "closed"},
+    "in_progress": {"waiting_on_user", "resolved", "open"},
+    "waiting_on_user": {"in_progress", "closed"},
+    "resolved": {"closed", "in_progress"},
+    "closed": set(),
+}
+
+
+@app.patch("/tickets/{ticket_id}/assign")
+def assign_ticket(ticket_id: int, payload: AssignIn):
+    """Assigns a technician, or unassigns with null.
+
+    404 if the ticket or the person does not exist.
+    422 if the person exists but is not a technician.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+
+            # A person can only be assigned work if they are a technician. The
+            # schema cannot express that: the foreign key only checks that the
+            # person exists, not what role they hold. So the check lives here.
+            if payload.technician_id is not None:
+                cur.execute(
+                    "SELECT role FROM people WHERE id = %s",
+                    (payload.technician_id,),
+                )
+                person = cur.fetchone()
+                if person is None:
+                    raise HTTPException(status_code=404, detail="person not found")
+                if person["role"] != "technician":
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"person is a {person['role']}, not a technician",
+                    )
+
+            cur.execute(
+                """
+                UPDATE tickets
+                   SET technician_id = %s
+                 WHERE id = %s
+                RETURNING *
+                """,
+                (payload.technician_id, ticket_id),
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="ticket not found")
+    return row
+
+
+@app.patch("/tickets/{ticket_id}/status")
+def change_status(ticket_id: int, payload: StatusIn):
+    """Moves a ticket to a new status, if the move is legal.
+
+    404 if the ticket does not exist.
+    409 if the move is not allowed from the current status, or if somebody
+        else changed the status between this request reading it and writing it.
+    422 if resolving without a resolution note.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                "SELECT status, resolved_at, resolution_note FROM tickets WHERE id = %s",
+                (ticket_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="ticket not found")
+
+            current = row["status"]
+            if payload.status not in LEGAL_TRANSITIONS[current]:
+                allowed = sorted(LEGAL_TRANSITIONS[current]) or ["nothing: closed is final"]
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"cannot go from {current} to {payload.status}; allowed: {allowed}",
+                )
+
+            if payload.status == "resolved" and not payload.resolution_note:
+                raise HTTPException(
+                    status_code=422,
+                    detail="resolution_note is required when resolving a ticket",
+                )
+
+            # resolved_at and resolution_note follow the status. A ticket that is
+            # not resolved must not carry a resolved timestamp, so reopening clears
+            # both; closing keeps them, because a closed ticket was resolved first.
+            if payload.status == "resolved":
+                new_resolved_at = datetime.now(timezone.utc)
+                new_note = payload.resolution_note
+            elif payload.status == "closed":
+                new_resolved_at = row["resolved_at"]
+                new_note = row["resolution_note"]
+            else:
+                new_resolved_at = None
+                new_note = None
+
+            # The old status is in the WHERE clause on purpose. If another request
+            # changed it after the SELECT above, this matches zero rows and nothing
+            # wrong gets written. That is optimistic concurrency control.
+            cur.execute(
+                """
+                UPDATE tickets
+                   SET status = %s,
+                       resolved_at = %s,
+                       resolution_note = %s
+                 WHERE id = %s
+                   AND status = %s
+                RETURNING *
+                """,
+                (payload.status, new_resolved_at, new_note, ticket_id, current),
+            )
+            updated = cur.fetchone()
+
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail="the ticket changed while this request was in flight; read it again and retry",
+        )
+    return updated
